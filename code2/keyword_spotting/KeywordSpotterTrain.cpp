@@ -1,0 +1,240 @@
+/************************************************************************
+ Copyright (c) 2006 Joseph Keshet
+ 
+ All rights reserved.
+ 
+ Redistribution and use in source and binary forms, with or without 
+ modification, are permitted provided that the following conditions are 
+ met: Redistributions of source code must retain the above copyright 
+ notice, this list of conditions and the following disclaimer.
+ Redistributions in binary form must reproduce the above copyright
+ notice, this list of conditions and the following disclaimer in the 
+ documentation and/or other materials provided with the distribution.
+ The name of the author may not be used to endorse or promote products
+ derived from this software without specific prior written permission.
+ 
+ THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR 
+ IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED 
+ WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, 
+ INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES 
+ (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR 
+ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) 
+ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ THE POSSIBILITY OF SUCH DAMAGE.
+ ************************************************************************/
+
+/************************************************************************
+ Project:  Discriminative Keyword Spotting
+ Module:   KeywordSpotterTrain
+ Purpose:  Main entry point
+ Date:     7 Aug., 2006
+ Programmer: Joseph Keshet
+ 
+ Function List:
+ main - Main entry point
+ 
+ **************************** INCLUDE FILES *****************************/
+#include <iostream>
+#include <fstream>
+#include <../learning_tools/cmdline/cmd_line.h>
+#include "Classifier.h"
+#include "Dataset.h"
+
+using namespace std;
+
+/************************************************************************
+ Function:     main
+ 
+ Description:  Main entry point
+ Inputs:       int argc, char *argv[] - main input params
+ Output:       int - always 0.
+ Comments:     none.
+ ***********************************************************************/
+int main(int argc, char **argv) 
+{
+  unsigned int frame_rate = 10;
+  double min_phoneme_length, max_phoneme_length;
+  string silence_symbol;
+  string val_pos_filelist;
+  string val_neg_filelist;
+  string val_keyword_phoneme_list; 
+  string val_keyword_alignment_list; 
+  string pos_filelist;
+  string neg_filelist;
+  string keyword_phoneme_list; 
+  string keyword_alignment_list; 
+  string phonemes_filename;
+  string phoneme_stats_filename;
+  string classifier_filename;
+  string dist_stats_filename;
+  double best_w_auc = 0.0;
+  double C, beta1, beta2, beta3;
+  bool classifier_saved = false;
+  bool remove_silence;
+  string scores_ext;
+  
+  learning::cmd_line cmdline;
+  cmdline.info("Training discriminative Keyword Spotter");
+  cmdline.add("-min_phoneme_length", "min. phoneme duration in msec [20]", &min_phoneme_length, 20);
+  cmdline.add("-max_phoneme_length", "max. phoneme duration in msec [330]",&max_phoneme_length, 330);
+  cmdline.add("-silence_symbol", "silence symbol [sil]", &silence_symbol, "sil");
+  cmdline.add("-dist_stats", "feature statstics filename [dist_stats.out]", 
+              &dist_stats_filename, "dist_stats.out");
+  cmdline.add("-remove_silence", "remove pre/post silence from data", &remove_silence, false);  
+  cmdline.add("-val_pos_filelist", "validation positive file list", &val_pos_filelist,"");
+  cmdline.add("-val_neg_filelist", "validation negative file list", &val_neg_filelist,"");
+  cmdline.add("-val_keyword_phoneme_list", "validation keyword phone list", 
+              &val_keyword_phoneme_list,"");
+  cmdline.add("-val_keyword_alignment_list", "validation keyword alignment list", 
+              &val_keyword_alignment_list,"");
+  cmdline.add("-PA1_C", "C parameter for PA-I", &C, 1.0);
+  cmdline.add("-beta1", "weight of the distance feature", &beta1, 0.01);
+  cmdline.add("-beta2", "weight of the duration feature", &beta2, 1.0);
+  cmdline.add("-beta3", "weight of the speaking rate feature", &beta3, 1.0);
+  cmdline.add("-scores_ext", "file extension for the scores", &scores_ext, ".scores");
+  cmdline.add_master_option("pos_filelist", &pos_filelist);
+  cmdline.add_master_option("neg_filelist", &neg_filelist);
+  cmdline.add_master_option("keyword_phoneme_list", &keyword_phoneme_list);
+  cmdline.add_master_option("keyword_alignment_list", &keyword_alignment_list);
+  cmdline.add_master_option("phonemes", &phonemes_filename);	
+  cmdline.add_master_option("phoneme-stats", &phoneme_stats_filename);
+  cmdline.add_master_option("classifier", &classifier_filename);
+  int rc = cmdline.parse(argc, argv);
+  if (rc < 7) {
+    cmdline.print_help();
+    return EXIT_FAILURE;
+  }
+  
+  // phoneme symbol to number mapping (Lee and Hon, 89)
+  PhonemeSequence::load_phoneme_map(phonemes_filename, silence_symbol);
+  
+  // Initiate classifier
+  Classifier classifier(frame_rate, min_phoneme_length, max_phoneme_length, C, beta1, beta2, beta3);
+  cout << "Loading classifier..." << endl;  
+  classifier.load(classifier_filename);
+  classifier.load_phoneme_stats(phoneme_stats_filename);
+  
+  Dataset training_dataset(pos_filelist, neg_filelist, keyword_phoneme_list,  keyword_alignment_list);
+  
+  // first, check the validations error
+  if ( val_pos_filelist != "") { // && classifier.was_changed() && l >= 20) {
+    cout << "Validation...\n";
+    Dataset val_dataset(val_pos_filelist, val_neg_filelist, val_keyword_phoneme_list, val_keyword_alignment_list);
+    double this_w_auc = 0.0;
+    for (uint m=0; m < val_dataset.size(); ++m) {
+      SpeechUtterance v_x_p, v_x_n;
+      StartTimeSequence v_s;
+      int v_end_frame;
+      PhonemeSequence v_keyword;
+      double v_confidence_p, v_confidence_n;
+      
+      // read next example for dataset
+      val_dataset.read(v_x_p, v_x_n, v_keyword, v_s, v_end_frame, scores_ext, remove_silence);
+      
+      // predict the alignment of the keyword in the positive sequence, s_p
+      cout << "keyword=/" << v_keyword << "/" << endl;
+      v_confidence_p = classifier.align_keyword(v_x_p, v_keyword, v_s, v_end_frame);
+      cout << "predict pos [" << v_confidence_p << "] " << v_s << " >" << v_end_frame << endl;
+      v_confidence_n = classifier.align_keyword(v_x_n, v_keyword, v_s, v_end_frame);
+      cout << "predict neg [" << v_confidence_n << "] " << v_s << " >" << v_end_frame << endl;
+      this_w_auc += ( (v_confidence_p > v_confidence_n) ? 1 : 0 );
+      cout << "confidence pos=" << v_confidence_p << " neg=" <<  v_confidence_n << endl;
+    }
+    this_w_auc /= val_dataset.size();
+    cout << " this_w_auc=" << this_w_auc << " best_w_auc=" << best_w_auc << endl;
+    if (this_w_auc > best_w_auc) {
+      best_w_auc = this_w_auc;
+      cout << "Saving classifier..." << endl;  
+      classifier.save(classifier_filename);
+      classifier_saved = true;
+    }
+    if (this_w_auc >= 0.9999) {
+      cout << "Done." << endl;  
+      return EXIT_SUCCESS;
+    }
+  }
+  
+  // Run over all dataset
+  for (uint l=0; l <  training_dataset.size(); l++) {
+    
+    PhonemeSequence keyword;
+    SpeechUtterance x_p, x_n, x_c;
+    StartTimeSequence s_p, s_n, s_c;
+    int end_frame_p, end_frame_n, end_frame_c;
+    double confidence_p, confidence_n, confidence_c;
+    
+    cout << "========================================================================" << endl;
+    
+    // read next example for dataset
+    training_dataset.read(x_p, x_n, keyword, s_c, end_frame_c, scores_ext, remove_silence);
+    cout << "keyword=/" << keyword << "/" << endl;
+    
+    // predict the alignment of the keyword in the positive sequence
+    confidence_p = classifier.align_keyword(x_p, keyword, s_p, end_frame_p);
+    cout << "phi pos=" << classifier.phi(x_p, keyword, s_p, end_frame_p) << endl;
+    cout << "predict pos [" << confidence_p << "] " << s_p << " >" << end_frame_p << endl;
+    
+    // confidence of the true alignment
+    confidence_c = classifier.confidence_keyword(x_p, keyword, s_c, end_frame_c);
+    cout << "true pos    [" << confidence_c << "] " << s_c << " >" << end_frame_c << endl;
+    
+    // predict the alignment of the keyword in the negative sequence
+    confidence_n = classifier.align_keyword(x_n, keyword, s_n, end_frame_n);
+    cout << "phi neg=" << classifier.phi(x_n, keyword, s_n, end_frame_n) << endl;
+    cout << "predict neg [" << confidence_n << "] " << s_n << " >" << end_frame_n << endl;
+    
+    // update hypothesis
+    cout << "confidence_p-confidence_n=" << confidence_p-confidence_n << endl;
+    classifier.update(keyword, x_p, s_c, end_frame_c, x_n, s_n, end_frame_n);
+    
+    // now, check the validations error
+    if ( val_pos_filelist != "" && classifier.was_changed() && l >= 20) {
+      cout << "Validation...\n";
+      Dataset val_dataset(val_pos_filelist, val_neg_filelist, val_keyword_phoneme_list, val_keyword_alignment_list);
+      double this_w_auc = 0.0;
+      for (uint m=0; m < val_dataset.size(); ++m) {
+        SpeechUtterance v_x_p, v_x_n;
+        StartTimeSequence v_s;
+        int v_end_frame;
+        PhonemeSequence v_keyword;
+        double v_confidence_p, v_confidence_n;
+        
+        // read next example for dataset
+        val_dataset.read(v_x_p, v_x_n, v_keyword, v_s, v_end_frame, scores_ext, remove_silence);
+        
+        // predict the alignment of the keyword in the positive sequence, s_p
+        v_confidence_p = classifier.align_keyword(v_x_p, v_keyword, v_s, v_end_frame);
+        v_confidence_n = classifier.align_keyword(v_x_n, v_keyword, v_s, v_end_frame);
+        
+        this_w_auc += ( (v_confidence_p > v_confidence_n) ? 1 : 0 );
+        cout << "confidence pos=" << v_confidence_p << " neg=" <<  v_confidence_n << endl;
+      }
+      this_w_auc /= val_dataset.size();
+      cout << "i=" << l << " this_w_auc=" << this_w_auc << " best_w_auc=" << best_w_auc << endl;
+      if (this_w_auc > best_w_auc) {
+        best_w_auc = this_w_auc;
+        cout << "Saving classifier..." << endl;  
+        classifier.save(classifier_filename);
+        classifier_saved = true;
+      }
+      if (this_w_auc >= 0.9999) {
+        cout << "Done." << endl;  
+        return EXIT_SUCCESS;
+      }
+    }
+    
+  } 
+  if (!classifier_saved) {
+    cout << "Saving classifier..." << endl;  
+    classifier.save(classifier_filename);
+  }
+  
+  cout << "Done." << endl;  
+  
+  return EXIT_SUCCESS;
+}
+
+// ------------------------------- EOF -----------------------------//

@@ -1,0 +1,133 @@
+/************************************************************************
+Project:  Phoeneme Frame-Based Classification
+Module:   PhonemeClassify
+Purpose:  Run phoneme classification as a sequences
+Date:     17 Jan., 2005
+Programmer: Joseph Keshet
+
+Function List:
+main - Main entry point
+
+**************************** INCLUDE FILES *****************************/
+#include <iostream>
+#include <fstream>
+#include <map>
+#include "../learning_tools/cmdline/cmd_line.h"
+#include "Classifier.h"
+#include "Dataset.h"
+
+using namespace std;
+
+/************************************************************************
+Function:     main
+
+Description:  Main entry point
+Inputs:       int argc, char *argv[] - main input params
+Output:       int - always 0.
+Comments:     none.
+***********************************************************************/
+int main(int argc, char **argv) 
+{
+  // Parse command line
+  string input_filelist;
+  string target_filelist;
+  string scores_filelist;
+  string phonemes_filename;
+  string classifier_filename;
+  string mfcc_stats_filename;
+  string kernel_name;
+  string silence_symbol;
+  bool o2b_enabled;
+  learning::cmd_line cmdline;
+  cmdline.info("Phoeneme Recognition Sequence Decoder");
+  cmdline.add("-kernel", "kernel file name", &kernel_name, "");
+  cmdline.add("-mfcc_stats", "feature statstics filename", &mfcc_stats_filename, "");
+  cmdline.add("-silence", "silence phoneme symbol [sil]", &silence_symbol, "sil");
+  cmdline.add("-averaging", "online-to-batch convergence using averaging", &o2b_enabled, false);  
+  cmdline.add("-scores", "output classifier scores filelist", &scores_filelist, "");
+  cmdline.add_master_option("input-filelist", &input_filelist);
+  cmdline.add_master_option("target-filelist [null]", &target_filelist);
+  cmdline.add_master_option("phonemes", &phonemes_filename);
+  cmdline.add_master_option("classifier", &classifier_filename);
+  int rc = cmdline.parse(argc, argv);
+  if (rc < 3) {
+    cmdline.print_help();
+    return EXIT_FAILURE;
+  }
+  
+  // Set the silence symbol
+  LabelType::set_silence_symbol(silence_symbol);
+  
+  // Load set of phonemes
+  LabelType::load_phoneme_map(phonemes_filename);
+  Dataset test_dataset(input_filelist, target_filelist);
+  
+  // load mfcc statistics (mean and std)
+  InstanceType::load_mfcc_stats(mfcc_stats_filename);
+  
+  // Initiate classifier  
+  Classifier classifier(0, 1.0, kernel_name, LabelType::num_phonemes, InstanceType::mfcc_dim, 
+                        test_dataset.size()); 
+  cout << "Loading classifier from disk... " << flush;
+  classifier.load(classifier_filename);
+  if (o2b_enabled) classifier.averaging();
+  cout << "Done." << endl;
+  
+  // loading confidences file list
+  StringVector scores_files;
+  if (scores_filelist != "")
+    scores_files.read(scores_filelist);
+  
+  // begining of the test set
+  test_dataset.initiate();
+  
+  
+  // Run over all dataset
+  for (int l=0; l <  test_dataset.size(); l++) {
+    
+    InstanceType x;
+    LabelType y;
+    LabelType y_hat;
+    infra::matrix scores;
+    
+    // read next example for dataset
+    cout << "Loading " << test_dataset.filename() << " " << flush;
+    test_dataset.read(x, y);
+    y_hat.resize(x.num_frames);
+    scores.resize(x.num_frames, LabelType::num_phonemes);
+    
+    uint this_file_error = 0;
+    for (int i=0; i < x.num_frames; i++) {
+      
+      infra::vector instance(x.mfcc.row(i));
+      
+      // predict label 
+      scores.row(i) = classifier.predict(instance, y_hat[i]);
+      //cout << "[" << i << "] " << scores.row(i) << endl;
+      
+      // compute error
+      if (test_dataset.labels_given() && y[i] != y_hat[i]) this_file_error++;      
+    }
+    if (test_dataset.labels_given())
+      cout << "frame error=" << this_file_error/double(x.num_frames) << endl;
+    else
+      cout << endl;
+
+    // write out to a prediction file
+    if (scores_filelist != "" && scores_files.size() > 0) {
+      ofstream ofs(scores_files[l].c_str());
+      if (ofs.good()) {
+        ofs << scores;
+      }
+      ofs.close();
+    }
+  }
+  
+  cout << "Done." << endl;  
+  
+  return EXIT_SUCCESS;
+}
+
+
+
+// ------------------------------- EOF -----------------------------//
